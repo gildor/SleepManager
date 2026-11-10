@@ -160,7 +160,14 @@ object BatterySleepStore {
             null,
             IntentFilter(Intent.ACTION_BATTERY_CHANGED)
         )
+        return snapshotFromIntent(context, batteryIntent)
+    }
 
+    internal fun snapshotFromIntent(
+        context: Context,
+        batteryIntent: Intent?,
+        chargeCounterFallback: Int? = null
+    ): BatterySnapshot {
         val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
         val percent =
@@ -188,7 +195,7 @@ object BatterySleepStore {
 
         val batteryManager =
             context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
-        val propertyCounter =
+        val propertyCounter = chargeCounterFallback ?:
             runCatching {
                 batteryManager?.getIntProperty(
                     BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER

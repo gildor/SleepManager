@@ -32,6 +32,8 @@ import com.med.sleepmanager.data.AppPreferences
 import com.med.sleepmanager.data.DiagnosticsCycleStore
 import com.med.sleepmanager.data.DiagnosticsStateStore
 import com.med.sleepmanager.data.DirectRadioStore
+import com.med.sleepmanager.history.BehaviorHistoryRecorder
+import com.med.sleepmanager.history.BehaviorState
 import com.med.sleepmanager.data.BatterySleepStore
 import com.med.sleepmanager.data.ClamshellStateStore
 import com.med.sleepmanager.data.SleepCycleStore
@@ -764,6 +766,16 @@ class SleepManagerService : Service() {
         }
     }
 
+    private var behaviorHistory: BehaviorHistoryRecorder? = null
+    private var observedHistoryLidClosed: Boolean? = null
+
+    private fun startBehaviorHistory() {
+        if (behaviorHistory != null || !AppPreferences.isEnabled(this)) return
+        behaviorHistory = BehaviorHistoryRecorder(this, observedHistoryLidClosed).also {
+            it.start(if (isEffectivelySleepingNow()) BehaviorState.STANDBY else BehaviorState.AWAKE)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         running = true
@@ -776,6 +788,7 @@ class SleepManagerService : Service() {
         maybeRestoreOwnedBasicSyncState()
         maybeRestoreDisabledRaOfflineProxyState()
         refreshLidMonitor()
+        startBehaviorHistory()
         recoverOwnedDeviceControls()
         recoverInterruptedSleepWifiMaintenance()
         Log.i(TAG, "Service started")
@@ -1040,6 +1053,7 @@ class SleepManagerService : Service() {
         refreshBasicSyncObserver()
         maybeRestoreOwnedBasicSyncState()
         refreshLidMonitor()
+        startBehaviorHistory()
 
         if (!initialScreenStateApplied) {
             initialScreenStateApplied = true
@@ -1186,6 +1200,8 @@ class SleepManagerService : Service() {
     }
 
     private fun beginDisableAndRestore() {
+        behaviorHistory?.stop()
+        behaviorHistory = null
         disableRestoreState.begin()
         DeviceControlStore.setBatterySaverDeferredForExternalPower(
             this,
@@ -1330,6 +1346,7 @@ class SleepManagerService : Service() {
         closedLidState.clearSleepRequestPending()
 
         if (sleepCycleRuntimeState.consumeFalseWakeResleepPending()) {
+            behaviorHistory?.protectedResleep()
             handler.removeCallbacks(closedLidScreenOnRecheckRunnable)
             Log.i(
                 TAG,
@@ -1338,6 +1355,7 @@ class SleepManagerService : Service() {
             return
         }
 
+        behaviorHistory?.standby()
         wakeTransitionSyncState.clear()
 
         if (
@@ -3559,6 +3577,7 @@ class SleepManagerService : Service() {
                 sleepDelayPending = sleepDelayState.isPending
             )
 
+        behaviorHistory?.wake(suppressed = wakeDecision.suppressWake)
         if (wakeDecision.suppressWake) {
             val preserveSleepTransaction =
                 SleepWakePolicy.shouldPreserveSleepTransactionOnFalseWake(
@@ -4026,6 +4045,8 @@ class SleepManagerService : Service() {
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
         val currentLidState = LidMonitor.readCurrentLidClosed()
+        observedHistoryLidClosed = currentLidState
+        behaviorHistory?.lid(currentLidState)
         clamshellLidState.initialize(
             currentLidState = currentLidState,
             interactive = powerManager?.isInteractive,
@@ -4045,6 +4066,8 @@ class SleepManagerService : Service() {
             onClosed = {
                 handler.post {
                     clamshellLidState.markClosed()
+                    observedHistoryLidClosed = true
+                    behaviorHistory?.lid(true)
                     closedLidState.clearAwakeOverride()
                     closedLidState.clearSleepIntent()
                     ClamshellStateStore.setLastKnownLidClosed(
@@ -4085,6 +4108,8 @@ class SleepManagerService : Service() {
             onOpened = {
                 handler.post {
                     clamshellLidState.markOpened()
+                    observedHistoryLidClosed = false
+                    behaviorHistory?.lid(false)
                     closedLidState.clearAwakeOverride()
                     closedLidState.clearSleepIntent()
                     closedLidState.clearSleepRequestPending()
@@ -4102,6 +4127,8 @@ class SleepManagerService : Service() {
             onError = { error ->
                 Log.e(TAG, "Lid monitor failed", error)
                 handler.post {
+                    observedHistoryLidClosed = null
+                    behaviorHistory?.lid(null)
                     DiagnosticsStateStore.recordEvent(
                         this,
                         "Closed-lid monitoring unavailable"
@@ -4350,6 +4377,8 @@ class SleepManagerService : Service() {
     }
 
     private fun stopLidMonitor() {
+        observedHistoryLidClosed = null
+        behaviorHistory?.lid(null)
         handler.removeCallbacks(closedLidGuardRunnable)
         handler.removeCallbacks(closedLidScreenOnRecheckRunnable)
         handler.removeCallbacks(dockDisconnectRunnable)
@@ -4637,6 +4666,8 @@ class SleepManagerService : Service() {
     }
 
     override fun onDestroy() {
+        behaviorHistory?.stop()
+        behaviorHistory = null
         wakeTransitionSyncState.clear()
         syncthingPreSleepState.invalidate()
 
